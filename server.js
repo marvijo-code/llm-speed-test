@@ -95,6 +95,28 @@ app.get('/api/models', async (req, res) => {
       .filter(key => key.startsWith('claude') || key.startsWith('anthropic/'))
       .map(key => key.replace('anthropic/', ''));
     
+    // Add Google Gemini models
+    const geminiModels = [
+      'gemini-1.5-pro',
+      'gemini-1.5-flash',
+      'gemini-pro'
+    ];
+    
+    // Add OpenRouter models
+    // Using just a selection of popular models for now
+    const openrouterModels = [
+      'anthropic/claude-3-opus',
+      'anthropic/claude-3-sonnet',
+      'anthropic/claude-3-haiku',
+      'openai/gpt-4-turbo',
+      'openai/gpt-4o',
+      'meta-llama/llama-3-70b-instruct',
+      'meta-llama/llama-3-8b-instruct',
+      'mistralai/mistral-large',
+      'mistralai/mistral-medium',
+      'mistralai/mistral-small'
+    ];
+    
     // Sort models to bring the most commonly used ones to the top
     const sortedOpenaiModels = [
       'gpt-4o-mini',
@@ -112,7 +134,9 @@ app.get('/api/models', async (req, res) => {
     
     const models = {
       openai: uniqueOpenaiModels,
-      anthropic: anthropicModels
+      anthropic: anthropicModels,
+      gemini: geminiModels,
+      openrouter: openrouterModels
     };
     
     res.json(models);
@@ -121,7 +145,9 @@ app.get('/api/models', async (req, res) => {
     // Fallback to hardcoded models if fetching fails
     const fallbackModels = {
       openai: ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo'],
-      anthropic: ['claude-3-haiku-20240307', 'claude-3-sonnet-20240229', 'claude-3-opus-20240229']
+      anthropic: ['claude-3-haiku-20240307', 'claude-3-sonnet-20240229', 'claude-3-opus-20240229'],
+      gemini: ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro'],
+      openrouter: ['anthropic/claude-3-opus', 'openai/gpt-4o', 'meta-llama/llama-3-70b-instruct']
     };
     res.json(fallbackModels);
   }
@@ -251,17 +277,29 @@ app.get('/api/test/openai/stream', (req, res) => {
     data: body,
     responseType: 'stream'
   }).then(response => {
+    // Buffer for handling partial chunks
+    let buffer = '';
+    
     response.data.on('data', (chunk) => {
-      // Convert the Buffer to a string
+      // Convert the Buffer to a string and add to buffer
       const chunkStr = chunk.toString();
-      const lines = chunkStr.split('\n');
+      buffer += chunkStr;
       
-      lines.forEach(line => {
+      // Process complete lines from the buffer
+      let newlineIndex;
+      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.substring(0, newlineIndex);
+        buffer = buffer.substring(newlineIndex + 1);
+        
         if (line.startsWith('data: ') && line !== 'data: [DONE]') {
           try {
-            if (line.includes('[DONE]')) return;
+            if (line.includes('[DONE]')) continue;
             
-            const data = JSON.parse(line.substring(6));
+            // Parse the JSON portion of the line
+            const dataStr = line.substring(6);
+            if (!dataStr.trim()) continue;
+            
+            const data = JSON.parse(dataStr);
             if (data.choices && data.choices[0].delta && data.choices[0].delta.content) {
               const content = data.choices[0].delta.content;
               fullResponse += content;
@@ -275,11 +313,12 @@ app.get('/api/test/openai/stream', (req, res) => {
           } catch (e) {
             // Some lines might not be complete JSON, which is fine
             if (!line.includes('[DONE]')) {
-              console.error('Error parsing OpenAI SSE data:', e);
+              console.log('Problematic line:', line.substring(0, 50) + '...');
+              console.error('Error parsing OpenAI SSE data:', e.message);
             }
           }
         }
-      });
+      }
     });
     
     response.data.on('end', () => {
@@ -381,15 +420,27 @@ app.get('/api/test/anthropic/stream', (req, res) => {
     data: body,
     responseType: 'stream'
   }).then(response => {
+    // Buffer for handling partial chunks
+    let buffer = '';
+    
     response.data.on('data', (chunk) => {
-      // Convert the Buffer to a string
+      // Convert the Buffer to a string and add to buffer
       const chunkStr = chunk.toString();
-      const lines = chunkStr.split('\n');
+      buffer += chunkStr;
       
-      lines.forEach(line => {
+      // Process complete lines from the buffer
+      let newlineIndex;
+      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.substring(0, newlineIndex);
+        buffer = buffer.substring(newlineIndex + 1);
+        
         if (line.startsWith('data: ')) {
           try {
-            const data = JSON.parse(line.substring(6));
+            // Parse the JSON portion of the line
+            const dataStr = line.substring(6);
+            if (!dataStr.trim()) continue;
+            
+            const data = JSON.parse(dataStr);
             if (data.type === 'content_block_delta' && data.delta && data.delta.text) {
               const content = data.delta.text;
               fullResponse += content;
@@ -402,10 +453,11 @@ app.get('/api/test/anthropic/stream', (req, res) => {
             }
           } catch (e) {
             // Some lines might not be complete JSON, which is fine
-            console.error('Error parsing Anthropic SSE data:', e);
+            console.log('Problematic line:', line.substring(0, 50) + '...');
+            console.error('Error parsing Anthropic SSE data:', e.message);
           }
         }
-      });
+      }
     });
     
     response.data.on('end', () => {
@@ -515,6 +567,273 @@ app.post('/api/test/openai', async (req, res) => {
       details: error.response?.data || error.message 
     });
   }
+});
+
+// Google Gemini API streaming endpoint
+app.get('/api/test/gemini/stream', (req, res) => {
+  const model = req.query.model;
+  const prompt = req.query.prompt;
+  
+  console.log(`Starting Gemini stream test for model: ${model}`);
+  
+  if (!model || !prompt) {
+    return res.status(400).json({ error: 'Model and prompt are required' });
+  }
+  
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'Gemini API key not found' });
+  }
+  
+  // Set up SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  
+  const startTime = Date.now();
+  let fullResponse = '';
+  
+  // Make streaming request to Google Gemini API
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${apiKey}`;
+  const body = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      maxOutputTokens: 1024
+    }
+  };
+  
+  const headers = {
+    'Content-Type': 'application/json'
+  };
+  
+  // Use Axios for streaming
+  axios({
+    method: 'POST',
+    url: url,
+    headers: headers,
+    data: body,
+    responseType: 'stream'
+  }).then(response => {
+    // Buffer for handling partial chunks
+    let buffer = '';
+    
+    response.data.on('data', (chunk) => {
+      // Convert the Buffer to a string and add to buffer
+      const chunkStr = chunk.toString();
+      buffer += chunkStr;
+      
+      // Process complete lines from the buffer
+      let newlineIndex;
+      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.substring(0, newlineIndex);
+        buffer = buffer.substring(newlineIndex + 1);
+        
+        if (line.startsWith('data: ')) {
+          try {
+            // Parse the JSON portion of the line
+            const dataStr = line.substring(6);
+            if (!dataStr.trim() || dataStr === '[DONE]') continue;
+            
+            const data = JSON.parse(dataStr);
+            if (data.candidates && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0].text) {
+              const content = data.candidates[0].content.parts[0].text;
+              fullResponse += content;
+              
+              // Send the content as an SSE event
+              res.write(`data: ${JSON.stringify({
+                type: 'content',
+                content
+              })}\n\n`);
+            }
+          } catch (e) {
+            console.log('Problematic line:', line.substring(0, 50) + '...');
+            console.error('Error parsing Gemini SSE data:', e.message);
+          }
+        }
+      }
+    });
+    
+    response.data.on('end', () => {
+      // Calculate tokens and stats
+      const endTime = Date.now();
+      const timeTaken = endTime - startTime;
+      
+      // This is approximate since we can't get the exact count from streaming
+      const promptTokens = Math.ceil(prompt.length / 4);
+      const responseTokens = Math.ceil(fullResponse.length / 4);
+      const tokensPerSecond = Math.round((responseTokens / (timeTaken / 1000)) * 100) / 100;
+      
+      // Send final stats
+      res.write(`data: ${JSON.stringify({
+        type: 'done',
+        result: {
+          model: model,
+          response: fullResponse,
+          prompt_length: promptTokens,
+          response_length: responseTokens,
+          time_taken_ms: timeTaken,
+          tokens_per_second: tokensPerSecond,
+          provider: 'Google'
+        }
+      })}\n\n`);
+      
+      res.end();
+    });
+    
+    response.data.on('error', (err) => {
+      console.error('Error with Gemini response stream:', err);
+      res.write(`data: ${JSON.stringify({
+        type: 'error',
+        error: err.message
+      })}\n\n`);
+      res.end();
+    });
+    
+  }).catch(err => {
+    console.error('Error with Gemini streaming request:', err);
+    res.write(`data: ${JSON.stringify({
+      type: 'error',
+      error: err.message || 'Unknown error'
+    })}\n\n`);
+    res.end();
+  });
+});
+
+// OpenRouter API streaming endpoint
+app.get('/api/test/openrouter/stream', (req, res) => {
+  const model = req.query.model;
+  const prompt = req.query.prompt;
+  
+  console.log(`Starting OpenRouter stream test for model: ${model}`);
+  
+  if (!model || !prompt) {
+    return res.status(400).json({ error: 'Model and prompt are required' });
+  }
+  
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'OpenRouter API key not found' });
+  }
+  
+  // Set up SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  
+  const startTime = Date.now();
+  let fullResponse = '';
+  
+  // Make streaming request to OpenRouter
+  const url = 'https://openrouter.ai/api/v1/chat/completions';
+  const body = {
+    model: model,
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: 1024,
+    stream: true
+  };
+  
+  const headers = {
+    'Authorization': `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+    'HTTP-Referer': 'https://llm-speed-test.app'
+  };
+  
+  // Use Axios for streaming
+  axios({
+    method: 'POST',
+    url: url,
+    headers: headers,
+    data: body,
+    responseType: 'stream'
+  }).then(response => {
+    // Buffer for handling partial chunks
+    let buffer = '';
+    
+    response.data.on('data', (chunk) => {
+      // Convert the Buffer to a string and add to buffer
+      const chunkStr = chunk.toString();
+      buffer += chunkStr;
+      
+      // Process complete lines from the buffer
+      let newlineIndex;
+      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.substring(0, newlineIndex);
+        buffer = buffer.substring(newlineIndex + 1);
+        
+        if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+          try {
+            if (line.includes('[DONE]')) continue;
+            
+            // Parse the JSON portion of the line
+            const dataStr = line.substring(6);
+            if (!dataStr.trim()) continue;
+            
+            const data = JSON.parse(dataStr);
+            if (data.choices && data.choices[0].delta && data.choices[0].delta.content) {
+              const content = data.choices[0].delta.content;
+              fullResponse += content;
+              
+              // Send the content as an SSE event
+              res.write(`data: ${JSON.stringify({
+                type: 'content',
+                content
+              })}\n\n`);
+            }
+          } catch (e) {
+            // Some lines might not be complete JSON, which is fine
+            if (!line.includes('[DONE]')) {
+              console.log('Problematic line:', line.substring(0, 50) + '...');
+              console.error('Error parsing OpenRouter SSE data:', e.message);
+            }
+          }
+        }
+      }
+    });
+    
+    response.data.on('end', () => {
+      // Calculate tokens and stats
+      const endTime = Date.now();
+      const timeTaken = endTime - startTime;
+      
+      // This is approximate since we can't get the exact count from streaming
+      const promptTokens = Math.ceil(prompt.length / 4);
+      const responseTokens = Math.ceil(fullResponse.length / 4);
+      const tokensPerSecond = Math.round((responseTokens / (timeTaken / 1000)) * 100) / 100;
+      
+      // Send final stats
+      res.write(`data: ${JSON.stringify({
+        type: 'done',
+        result: {
+          model: model,
+          response: fullResponse,
+          prompt_length: promptTokens,
+          response_length: responseTokens,
+          time_taken_ms: timeTaken,
+          tokens_per_second: tokensPerSecond,
+          provider: 'OpenRouter'
+        }
+      })}\n\n`);
+      
+      res.end();
+    });
+    
+    response.data.on('error', (err) => {
+      console.error('Error with OpenRouter response stream:', err);
+      res.write(`data: ${JSON.stringify({
+        type: 'error',
+        error: err.message
+      })}\n\n`);
+      res.end();
+    });
+    
+  }).catch(err => {
+    console.error('Error with OpenRouter streaming request:', err);
+    res.write(`data: ${JSON.stringify({
+      type: 'error',
+      error: err.message || 'Unknown error'
+    })}\n\n`);
+    res.end();
+  });
 });
 
 // Serve static files in production
