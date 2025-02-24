@@ -51,7 +51,8 @@ function App() {
     openai: [],
     anthropic: [],
     gemini: [],
-    openrouter: []
+    openrouter: [],
+    hyperbolic: []
   });
   const [error, setError] = useState('');
   const [showResults, setShowResults] = useState(false);
@@ -459,17 +460,18 @@ function App() {
     });
 
     // Determine colors based on provider
-    const backgroundColor = labels.map(label => 
-      label.includes('OpenAI') 
-        ? 'rgba(0, 166, 126, 0.2)' 
-        : 'rgba(75, 0, 130, 0.2)'
-    );
+    const getProviderColor = (label) => {
+      if (label.includes('OpenAI')) return { bg: 'rgba(0, 166, 126, 0.2)', border: 'rgba(0, 166, 126, 1)' };
+      if (label.includes('Anthropic')) return { bg: 'rgba(75, 0, 130, 0.2)', border: 'rgba(75, 0, 130, 1)' };
+      if (label.includes('Google')) return { bg: 'rgba(66, 133, 244, 0.2)', border: 'rgba(66, 133, 244, 1)' };
+      if (label.includes('OpenRouter')) return { bg: 'rgba(255, 153, 0, 0.2)', border: 'rgba(255, 153, 0, 1)' };
+      if (label.includes('Hyperbolic')) return { bg: 'rgba(220, 20, 60, 0.2)', border: 'rgba(220, 20, 60, 1)' };
+      if (label.includes('deepseek')) return { bg: 'rgba(30, 144, 255, 0.2)', border: 'rgba(30, 144, 255, 1)' };
+      return { bg: 'rgba(128, 128, 128, 0.2)', border: 'rgba(128, 128, 128, 1)' };
+    };
     
-    const borderColor = labels.map(label => 
-      label.includes('OpenAI') 
-        ? 'rgba(0, 166, 126, 1)' 
-        : 'rgba(75, 0, 130, 1)'
-    );
+    const backgroundColor = labels.map(label => getProviderColor(label).bg);
+    const borderColor = labels.map(label => getProviderColor(label).border);
 
     return {
       labels,
@@ -532,6 +534,7 @@ function App() {
               <option value="anthropic">Anthropic</option>
               <option value="gemini">Google Gemini</option>
               <option value="openrouter">OpenRouter</option>
+              <option value="hyperbolic">Hyperbolic</option>
             </select>
             
             <select
